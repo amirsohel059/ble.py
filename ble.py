@@ -1,127 +1,139 @@
-import dbus
-import dbus.exceptions
-import dbus.mainloop.glib
-import dbus.service
-from gi.repository import GLib
-from pydbus import SystemBus
 import os
+import sys
+import time
+import threading
 import subprocess
+from fractions import Fraction
 
-SERVICE_NAME = 'org.bluez'
-ADAPTER_IFACE = 'org.bluez.Adapter1'
-DEVICE_IFACE = 'org.bluez.Device1'
-GATT_MANAGER_IFACE = 'org.bluez.GattManager1'
-GATT_SERVICE_IFACE = 'org.bluez.GattService1'
-GATT_CHRC_IFACE = 'org.bluez.GattCharacteristic1'
-BLUEZ_SERVICE_NAME = 'org.bluez'
-BLUEZ_ADAPTER_PATH = '/org/bluez/hci0'
-GATT_CHRC_UUID = '0000xxxx-0000-1000-8000-00805f9b34fb'
-GATT_SERVICE_UUID = '0000xxxx-0000-1000-8000-00805f9b34fb'
+import numpy as np
+import pyaudio
+import picamera2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import FileOutput
 
-class WiFiProvisioningService(dbus.service.Object):
-    def __init__(self, bus, index):
-        self.path = f'/org/bluez/example/service{index}'
-        self.bus = bus
-        self.uuid = GATT_SERVICE_UUID
-        self.characteristics = []
-        dbus.service.Object.__init__(self, bus, self.path)
-        self.add_characteristic(WiFiProvisioningCharacteristic(bus, 0, self))
+# Configurable parameters
+VIDEO_RESOLUTION = (1280, 720)  # Resolution for the video
+FPS = 30                        # Frames per second for the video
+AUDIO_SAMPLING_RATE = 16000     # Audio sampling rate in Hz
+AUDIO_CHANNELS = 1              # Number of audio channels
+BUFFER_LENGTH = 1024            # Audio buffer length
+VIDEO_CODEC = 'libx264'         # Video codec
+AUDIO_CODEC = 'aac'             # Audio codec
+PIXEL_FORMAT = 'yuv420p'        # Pixel format
 
-    def get_properties(self):
-        return {
-            GATT_SERVICE_IFACE: {
-                'UUID': self.uuid,
-                'Primary': True,
-                'Characteristics': dbus.Array(self.get_characteristic_paths(), signature='o')
-            }
-        }
-
-    def get_characteristic_paths(self):
-        result = []
-        for characteristic in self.characteristics:
-            result.append(characteristic.get_path())
-        return result
-
-    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature='s', out_signature='a{sv}')
-    def GetAll(self, interface):
-        if interface != GATT_SERVICE_IFACE:
-            raise dbus.exceptions.DBusException(
-                'org.freedesktop.DBus.Error.InvalidArgs')
-        return self.get_properties()
-
-    def add_characteristic(self, characteristic):
-        self.characteristics.append(characteristic)
-
-class WiFiProvisioningCharacteristic(dbus.service.Object):
-    def __init__(self, bus, index, service):
-        self.path = f'{service.path}/char{index}'
-        self.bus = bus
-        self.uuid = GATT_CHRC_UUID
-        self.service = service
-        self.flags = ['read', 'write']
-        dbus.service.Object.__init__(self, bus, self.path)
-
-    def get_properties(self):
-        return {
-            GATT_CHRC_IFACE: {
-                'UUID': self.uuid,
-                'Service': self.service.get_path(),
-                'Flags': self.flags
-            }
-        }
-
-    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature='s', out_signature='a{sv}')
-    def GetAll(self, interface):
-        if interface != GATT_CHRC_IFACE:
-            raise dbus.exceptions.DBusException(
-                'org.freedesktop.DBus.Error.InvalidArgs')
-        return self.get_properties()
-
-    @dbus.service.method(GATT_CHRC_IFACE, in_signature='ay', out_signature='ay')
-    def ReadValue(self, options):
-        print("ReadValue called")
-        return []
-
-    @dbus.service.method(GATT_CHRC_IFACE, in_signature='ayay', out_signature='')
-    def WriteValue(self, value, options):
-        print("WriteValue called")
-        credentials = bytes(value).decode('utf-8')
-        ssid, password = credentials.split(',')
-        self.connect_to_wifi(ssid, password)
-
-    def connect_to_wifi(self, ssid, password):
+# Error handling and user input functions
+def handle_errors(func):
+    def wrapper(*args, **kwargs):
         try:
-            with open('/etc/wpa_supplicant/wpa_supplicant.conf', 'a') as wpa_file:
-                wpa_file.write(f'\nnetwork={{\n\tssid="{ssid}"\n\tpsk="{password}"\n}}')
-            
-            subprocess.run(['sudo', 'wpa_cli', '-i', 'wlan0', 'reconfigure'], check=True)
-            print(f"Connected to WiFi network: {ssid}")
+            return func(*args, **kwargs)
         except Exception as e:
-            print(f"Failed to connect to WiFi: {e}")
+            print(f"An error occurred: {e}")
+            sys.exit(1)
+    return wrapper
+
+@handle_errors
+def get_user_input(prompt):
+    return input(prompt)
+
+# Audio recording setup
+class AudioRecorder:
+    def __init__(self, filename):
+        self.filename = filename
+        self.audio = pyaudio.PyAudio()
+        self.stream = None
+        self.frames = []
+        self.is_recording = False
+
+    def start_recording(self):
+        self.stream = self.audio.open(format=pyaudio.paInt16,
+                                      channels=AUDIO_CHANNELS,
+                                      rate=AUDIO_SAMPLING_RATE,
+                                      input=True,
+                                      frames_per_buffer=BUFFER_LENGTH)
+        self.is_recording = True
+        print("Audio recording started")
+        self._record()
+
+    def _record(self):
+        while self.is_recording:
+            data = self.stream.read(BUFFER_LENGTH)
+            self.frames.append(data)
+
+    def stop_recording(self):
+        self.is_recording = False
+        self.stream.stop_stream()
+        self.stream.close()
+        self.audio.terminate()
+
+        with open(self.filename, 'wb') as f:
+            for frame in self.frames:
+                f.write(frame)
+        print("Audio recording stopped")
+
+# Video recording setup
+class VideoRecorder:
+    def __init__(self, filename):
+        self.filename = filename
+        self.camera = picamera2.Picamera2()
+        self.camera_config = self.camera.create_still_configuration(main={"size": VIDEO_RESOLUTION})
+        self.camera.configure(self.camera_config)
+        self.encoder = H264Encoder()
+        self.output = FileOutput(self.filename)
+
+    def start_recording(self):
+        self.camera.start_recording(self.encoder, self.output)
+        print("Video recording started")
+
+    def stop_recording(self):
+        self.camera.stop_recording()
+        self.output.close()
+        print("Video recording stopped")
+
+# Function to start recording audio and video
+def start_recording(video_file, audio_file):
+    audio_recorder = AudioRecorder(audio_file)
+    video_recorder = VideoRecorder(video_file)
+
+    audio_thread = threading.Thread(target=audio_recorder.start_recording)
+    video_thread = threading.Thread(target=video_recorder.start_recording)
+
+    audio_thread.start()
+    video_thread.start()
+
+    get_user_input("Press Enter to stop recording...")
+
+    audio_recorder.stop_recording()
+    video_recorder.stop_recording()
+
+    audio_thread.join()
+    video_thread.join()
+
+    return video_file, audio_file
+
+# Function to merge audio and video using ffmpeg
+@handle_errors
+def merge_audio_video(video_file, audio_file, output_file):
+    command = [
+        'ffmpeg',
+        '-y',  # Overwrite output file if it exists
+        '-i', video_file,
+        '-i', audio_file,
+        '-c:v', VIDEO_CODEC,
+        '-c:a', AUDIO_CODEC,
+        '-pix_fmt', PIXEL_FORMAT,
+        '-vsync', '1',  # Sync video with audio
+        output_file
+    ]
+    subprocess.run(command, check=True)
+    print(f"Audio and video merged into {output_file}")
 
 def main():
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = SystemBus()
+    video_file = 'video.h264'
+    audio_file = 'audio.wav'
+    output_file = 'output.mp4'
 
-    adapter = bus.get(SERVICE_NAME, BLUEZ_ADAPTER_PATH)
-    adapter_props = dbus.Interface(adapter, dbus.PROPERTIES_IFACE)
-    
-    try:
-        adapter_props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(1))
-    except dbus.exceptions.DBusException as e:
-        print(f"Failed to set adapter powered on: {e}")
+    video_file, audio_file = start_recording(video_file, audio_file)
+    merge_audio_video(video_file, audio_file, output_file)
 
-    service = WiFiProvisioningService(bus, 0)
-    manager = dbus.Interface(bus.get_object(SERVICE_NAME, BLUEZ_ADAPTER_PATH), GATT_MANAGER_IFACE)
-    try:
-        manager.RegisterApplication(service.get_path(), {},
-                                    reply_handler=lambda: print('GATT application registered'),
-                                    error_handler=lambda e: print(f'Failed to register application: {e}'))
-    except dbus.exceptions.DBusException as e:
-        print(f"Failed to register GATT application: {e}")
-
-    mainloop = GLib.MainLoop()
-    mainloop.run()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
