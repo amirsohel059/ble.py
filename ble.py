@@ -105,13 +105,20 @@ def main():
 
     adapter = bus.get(SERVICE_NAME, BLUEZ_ADAPTER_PATH)
     adapter_props = dbus.Interface(adapter, dbus.PROPERTIES_IFACE)
-    adapter_props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(1))
+    
+    try:
+        adapter_props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(1))
+    except dbus.exceptions.DBusException as e:
+        print(f"Failed to set adapter powered on: {e}")
 
     service = WiFiProvisioningService(bus, 0)
     manager = dbus.Interface(bus.get_object(SERVICE_NAME, BLUEZ_ADAPTER_PATH), GATT_MANAGER_IFACE)
-    manager.RegisterApplication(service.get_path(), {},
-                                reply_handler=lambda: print('GATT application registered'),
-                                error_handler=lambda e: print(f'Failed to register application: {e}'))
+    try:
+        manager.RegisterApplication(service.get_path(), {},
+                                    reply_handler=lambda: print('GATT application registered'),
+                                    error_handler=lambda e: print(f'Failed to register application: {e}'))
+    except dbus.exceptions.DBusException as e:
+        print(f"Failed to register GATT application: {e}")
 
     mainloop = GLib.MainLoop()
     mainloop.run()
