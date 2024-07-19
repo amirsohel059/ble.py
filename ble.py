@@ -20,6 +20,7 @@ BUFFER_LENGTH = 1024            # Audio buffer length
 VIDEO_CODEC = 'libx264'         # Video codec
 AUDIO_CODEC = 'aac'             # Audio codec
 PIXEL_FORMAT = 'yuv420p'        # Pixel format
+AUDIO_DEVICE_INDEX = 0          # Index of the audio device
 
 # Error handling and user input functions
 def handle_errors(func):
@@ -49,6 +50,7 @@ class AudioRecorder:
                                       channels=AUDIO_CHANNELS,
                                       rate=AUDIO_SAMPLING_RATE,
                                       input=True,
+                                      input_device_index=AUDIO_DEVICE_INDEX,
                                       frames_per_buffer=BUFFER_LENGTH)
         self.is_recording = True
         print("Audio recording started")
@@ -75,7 +77,7 @@ class VideoRecorder:
     def __init__(self, filename):
         self.filename = filename
         self.camera = picamera2.Picamera2()
-        self.camera_config = self.camera.create_still_configuration(main={"size": VIDEO_RESOLUTION})
+        self.camera_config = self.camera.create_video_configuration(main={"size": VIDEO_RESOLUTION, "format": "RGB888"})
         self.camera.configure(self.camera_config)
         self.encoder = H264Encoder()
         self.output = FileOutput(self.filename)
